@@ -6,19 +6,13 @@ import tempfile
 import io
 import matplotlib.pyplot as plt
 
+
 # ------------------- Utility Functions -------------------
 
 def load_image(image_path, size=None):
-    """Load an image from a file path or bytes"""
-    if isinstance(image_path, (str, bytes)):
-        img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    else:
-        # For PIL Image objects
-        img = np.array(image_path)
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    
+    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
     if img is None:
-        raise ValueError(f"Could not load image")
+        raise ValueError(f"Could not load image from {image_path}")
     
     if len(img.shape) == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
@@ -33,125 +27,84 @@ def load_image(image_path, size=None):
     return img
 
 def preprocess_image(img):
-    """Apply Gaussian blur and normalize pixel values"""
-    img = cv2.GaussianBlur(img, (3,3), 0)
-    img_float = img.astype(np.float32) / 255.0
-    return img_float
-
-def fourier_transform(img):
-    """Apply 2D Fourier transform to each RGB channel"""
-    fft_img = np.zeros_like(img, dtype=np.complex64)
-    for i in range(3):
-        fft_img[:,:,i] = np.fft.fftshift(np.fft.fft2(img[:,:,i]))
-    return fft_img
-
-def inverse_fourier_transform(fft_img):
-    """Apply inverse 2D Fourier transform to each RGB channel"""
-    img = np.zeros_like(fft_img, dtype=np.float32)
-    for i in range(3):
-        img[:,:,i] = np.real(np.fft.ifft2(np.fft.ifftshift(fft_img[:,:,i])))
-    return img
-
-def amplitude_style_transfer(content_fft, style_fft, alpha=0.5):
-    """Transfer the amplitude (magnitude) spectrum from style to content"""
-    result_fft = np.zeros_like(content_fft, dtype=complex)
-    for i in range(3):
-        content_amp = np.abs(content_fft[:,:,i])
-        content_phase = np.angle(content_fft[:,:,i])
-        style_amp = np.abs(style_fft[:,:,i])
-        blended_amp = (1 - alpha) * content_amp + alpha * style_amp
-        result_fft[:,:,i] = blended_amp * np.exp(1j * content_phase)
-    return result_fft
-
-def phase_style_transfer(content_fft, style_fft, beta=0.2):
-    """Transfer the phase spectrum from style to content"""
-    result_fft = np.zeros_like(content_fft, dtype=complex)
-    for i in range(3):
-        content_amp = np.abs(content_fft[:,:,i])
-        content_phase = np.angle(content_fft[:,:,i])
-        style_phase = np.angle(style_fft[:,:,i])
-        blended_phase = (1 - beta) * content_phase + beta * style_phase
-        result_fft[:,:,i] = content_amp * np.exp(1j * blended_phase)
-    return result_fft
+    img = cv2.GaussianBlur(img, (3, 3), 0)
+    return img.astype(np.float32) / 255.0
 
 def postprocess_image(img):
-    """Clip values to [0,1] range and convert to uint8"""
     img = np.clip(img, 0, 1)
     return (img * 255).astype(np.uint8)
 
-def visualize_spectrum(fft_img, log_scale=True, color_channels=False):
+def is_grayscale(img):
+    return np.allclose(img[:, :, 0], img[:, :, 1]) and np.allclose(img[:, :, 1], img[:, :, 2])
+
+def visualize_spectrum(fft_img, log_scale=True):
+    spectrum = np.mean(np.abs(fft_img), axis=2)
+    if log_scale:
+        spectrum = np.log(spectrum + 1e-10)
+    eps = 1e-10
+    spectrum = (spectrum - spectrum.min()) / (spectrum.max() - spectrum.min() + eps)
+    return (spectrum * 255).astype(np.uint8)
+
+# ------------------- Fourier Domain Functions -------------------
+
+def fourier_transform(img):
+    fft_img = np.zeros_like(img, dtype=np.complex64)
+    for i in range(3):
+        fft_img[:, :, i] = np.fft.fftshift(np.fft.fft2(img[:, :, i]))
+    return fft_img
+
+def inverse_fourier_transform(fft_img):
+    img = np.zeros_like(fft_img, dtype=np.float32)
+    for i in range(3):
+        img[:, :, i] = np.real(np.fft.ifft2(np.fft.ifftshift(fft_img[:, :, i])))
+    return img
+
+# ------------------- Style Transfer Modes -------------------
+
+def amplitude_only_transfer(content_fft, style_fft, alpha):
+    result_fft = np.zeros_like(content_fft, dtype=complex)
+    for i in range(3):
+        content_amp = np.abs(content_fft[:, :, i])
+        content_phase = np.angle(content_fft[:, :, i])
+        style_amp = np.abs(style_fft[:, :, i])
+        blended_amp = (1 - alpha) * content_amp + alpha * style_amp
+        result_fft[:, :, i] = blended_amp * np.exp(1j * content_phase)
+    return result_fft
+
+def phase_only_transfer(content_fft, style_fft, beta):
+    result_fft = np.zeros_like(content_fft, dtype=complex)
+    for i in range(3):
+        content_amp = np.abs(content_fft[:, :, i])
+        content_phase = np.angle(content_fft[:, :, i])
+        style_phase = np.angle(style_fft[:, :, i])
+        blended_phase = (1 - beta) * content_phase + beta * style_phase
+        result_fft[:, :, i] = content_amp * np.exp(1j * blended_phase)
+    return result_fft
+
+def combined_transfer(content_fft, style_fft, alpha, beta):
+    result_fft = np.zeros_like(content_fft, dtype=complex)
+    for i in range(3):
+        content_amp = np.abs(content_fft[:, :, i])
+        content_phase = np.angle(content_fft[:, :, i])
+        style_amp = np.abs(style_fft[:, :, i])
+        style_phase = np.angle(style_fft[:, :, i])
+        
+        blended_amp = (1 - alpha) * content_amp + alpha * style_amp
+        blended_phase = (1 - beta) * content_phase + beta * style_phase
+        result_fft[:, :, i] = blended_amp * np.exp(1j * blended_phase)
+    return result_fft
+
+def color_transfer_lab(content_img, style_img, strength=0.5):
     """
-    Visualize the frequency spectrum of an image.
+    Transfer colors from style to content using LAB color space.
     
     Parameters:
-    - fft_img: Fourier transform of an image
-    - log_scale: Whether to use log scale for better visualization
-    - color_channels: If True, visualize each RGB channel separately
+    - content_img: Content image
+    - style_img: Style image
+    - strength: Strength of color transfer (0-1)
     
     Returns:
-    - Visualization of the frequency spectrum
-    """
-    if color_channels:
-        # Visualize each RGB channel separately
-        vis_spectra = []
-        for i in range(3):
-            channel_spectrum = np.abs(fft_img[:,:,i])
-            if log_scale:
-                channel_spectrum = np.log(channel_spectrum + 1e-10)
-            eps = 1e-10
-            channel_spectrum = (channel_spectrum - channel_spectrum.min()) / (channel_spectrum.max() - channel_spectrum.min() + eps)
-            vis_spectra.append((channel_spectrum * 255).astype(np.uint8))
-            
-        # Create a colored visualization by putting each channel in RGB
-        colored_spectrum = np.zeros((fft_img.shape[0], fft_img.shape[1], 3), dtype=np.uint8)
-        colored_spectrum[:,:,0] = vis_spectra[0]  # R
-        colored_spectrum[:,:,1] = vis_spectra[1]  # G
-        colored_spectrum[:,:,2] = vis_spectra[2]  # B
-        
-        return colored_spectrum
-    else:
-        # Average across channels (grayscale visualization)
-        spectrum = np.mean(np.abs(fft_img), axis=2)
-        if log_scale:
-            spectrum = np.log(spectrum + 1e-10)
-        eps = 1e-10
-        spectrum = (spectrum - spectrum.min()) / (spectrum.max() - spectrum.min() + eps)
-        return (spectrum * 255).astype(np.uint8)
-
-# ------------------- Color Transfer Functions -------------------
-
-def match_histograms(source, reference):
-    """
-    Adjust the pixel values of source to match the histogram of reference.
-    Works on each RGB channel independently.
-    """
-    result = np.zeros_like(source)
-    
-    for i in range(3):  # For each RGB channel
-        src_values = source[:,:,i].flatten()
-        ref_values = reference[:,:,i].flatten()
-        
-        # Get the set of unique pixel values and their indices in source
-        s_values, bin_idx, s_counts = np.unique(src_values, return_inverse=True, return_counts=True)
-        
-        # Get the set of unique pixel values and their counts in reference
-        r_values, r_counts = np.unique(ref_values, return_counts=True)
-        
-        # Calculate the normalized cumulative histograms
-        s_quantiles = np.cumsum(s_counts) / s_counts.sum()
-        r_quantiles = np.cumsum(r_counts) / r_counts.sum()
-        
-        # Map the source values to reference values based on quantiles
-        interp_values = np.interp(s_quantiles, r_quantiles, r_values)
-        
-        # Apply the mapping to source pixels
-        result[:,:,i] = interp_values[bin_idx].reshape(source[:,:,i].shape)
-    
-    return result
-
-def color_transfer(content_img, style_img, strength=0.5):
-    """
-    Transfer colors from style to content using LAB color space
+    - Image with transferred colors
     """
     # Convert from RGB to LAB color space
     content_lab = cv2.cvtColor((content_img * 255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
@@ -181,53 +134,84 @@ def color_transfer(content_img, style_img, strength=0.5):
     
     return result_rgb.astype(np.float32) / 255.0
 
+def fourier_color_transfer_lab(content_img, style_img, alpha=0.5):
+    """
+    Transfer color from style to content using Fourier transform on LAB a/b channels.
+    
+    Parameters:
+    - content_img: RGB image in float32 [0,1]
+    - style_img: RGB image in float32 [0,1]
+    - alpha: Style strength (0 = content only, 1 = style only)
+    
+    Returns:
+    - RGB image with LAB-based color transfer via Fourier
+    """
+    # Convert to LAB color space
+    content_lab = cv2.cvtColor((content_img * 255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    style_lab = cv2.cvtColor((style_img * 255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    result_lab = np.copy(content_lab)
+
+    # Keep L (lightness) from content — for structure preservation
+    result_lab[:,:,0] = content_lab[:,:,0]
+
+    for ch in [1, 2]:  # a and b channels
+        content_fft = np.fft.fft2(content_lab[:,:,ch])
+        style_fft = np.fft.fft2(style_lab[:,:,ch])
+
+        content_amp = np.abs(content_fft)
+        content_phase = np.angle(content_fft)
+        style_amp = np.abs(style_fft)
+
+        # Blend amplitude spectrum
+        blended_amp = (1 - alpha) * content_amp + alpha * style_amp
+
+        # Reconstruct with content phase and blended amplitude
+        result_fft = blended_amp * np.exp(1j * content_phase)
+        result_lab[:,:,ch] = np.real(np.fft.ifft2(result_fft))
+
+    # Clip and convert back to RGB
+    result_lab[:,:,1:] = np.clip(result_lab[:,:,1:], 0, 255)
+    result_rgb = cv2.cvtColor(result_lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+
+    return result_rgb.astype(np.float32) / 255.0
+
+
 # ------------------- Main Style Transfer Function -------------------
 
-def fourier_style_transfer(content_img, style_img, method='combined', alpha=0.5, beta=0.2, gamma=None):
-    """
-    Apply style transfer using Fourier transforms and various methods
-    """
-    # Preprocess images
+def fourier_style_transfer(content_img, style_img, method='amplitude', alpha=0.5, beta=0.2):
+    print("Preprocessing images...")
     content_img = preprocess_image(content_img)
     style_img = preprocess_image(style_img)
 
-    # Compute Fourier transforms
+    print("Applying Fourier transforms...")
     content_fft = fourier_transform(content_img)
     style_fft = fourier_transform(style_img)
-    
-    if method == 'color':
+
+    print(f"Transferring style using method: {method}")
+    if method == 'color_lab':
         # Use LAB color space transfer
-        result_img = color_transfer(content_img, style_img, strength=alpha)
+        result_img = color_transfer_lab(content_img, style_img, strength=alpha)
         # Compute FFT of result for visualization
         result_fft = fourier_transform(result_img)
-        
-    elif method == 'histogram':
-        # Use histogram matching
-        result_img = match_histograms(content_img, style_img)
+    elif method == 'fourier_color_lab':
+        # Use LAB color space fourier transfer
+        result_img = fourier_color_transfer_lab(content_img, style_img, alpha=alpha)
         # Compute FFT of result for visualization
         result_fft = fourier_transform(result_img)
-        
     else:
         # Apply Fourier transforms-based style transfer
         if method == 'amplitude':
-            result_fft = amplitude_style_transfer(content_fft, style_fft, alpha)
+            result_fft = amplitude_only_transfer(content_fft, style_fft, alpha)
         elif method == 'phase':
-            result_fft = phase_style_transfer(content_fft, style_fft, beta)
+            result_fft = phase_only_transfer(content_fft, style_fft, beta)
         elif method == 'combined':
-            temp_fft = amplitude_style_transfer(content_fft, style_fft, alpha)
-            result_fft = phase_style_transfer(temp_fft, style_fft, beta)
+            temp_fft = amplitude_only_transfer(content_fft, style_fft, alpha)
+            result_fft = phase_only_transfer(temp_fft, style_fft, beta)
         else:
             raise ValueError(f"Unknown method: {method}")
             
         result_img = inverse_fourier_transform(result_fft)
-
-    if gamma is not None and gamma > 0:
-        # Apply grayscale blending if gamma > 0
-        gray = cv2.cvtColor((result_img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-        gray_rgb = np.stack([gray]*3, axis=-1)
-        result_img = (1 - gamma) * result_img + gamma * gray_rgb
-        # Update result FFT after grayscale blending
-        result_fft = fourier_transform(result_img)
 
     return postprocess_image(result_img), content_fft, style_fft, result_fft
 
@@ -319,14 +303,14 @@ def main():
     
     method = st.sidebar.selectbox(
         "Transfer Method",
-        ["color", "amplitude", "phase", "combined", "histogram"],
+        ["color_lab", "fourier_color_lab", "amplitude", "phase", "combined"],
         index=0,
         help="""
-        - color: Transfer colors using LAB color space (often most natural)
+        - color_lab: Transfer colors using LAB color space
+        - fourier_color_lab: Transfer colors using Fourier transform on LAB channels
         - amplitude: Transfer frequency magnitudes
         - phase: Transfer frequency phases
         - combined: Transfer both amplitude and phase
-        - histogram: Match color histograms
         """
     )
     
@@ -336,8 +320,6 @@ def main():
     beta = st.sidebar.slider("Beta (Phase influence)", 0.0, 1.0, 0.2,
                             help="Controls the strength of phase transfer (for phase and combined methods)")
     
-    gamma = st.sidebar.slider("Gamma (Grayscale Blend)", 0.0, 1.0, 0.0,
-                             help="Blend with grayscale version (0.0 = full color, 1.0 = grayscale)")
     
     size_options = {"256x256": (256, 256), "512x512": (512, 512), "1024x1024": (1024, 1024)}
     size_choice = st.sidebar.selectbox("Resize Images to", list(size_options.keys()), index=1)
@@ -408,7 +390,6 @@ def main():
                         method=method, 
                         alpha=alpha, 
                         beta=beta,
-                        gamma=gamma
                     )
                     
                     # Create visualization
